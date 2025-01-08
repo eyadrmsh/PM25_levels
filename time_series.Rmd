@@ -1,0 +1,1160 @@
+---
+title: "Time series analysis of economic-financial data: Final project"
+author: "Del Frari Elisa, Durmush Derya, Vastola Giorgia"
+date: "May 2024"
+header_includes:
+- \usepackage{amsmath}
+- \usepackage{amssymb}
+- \usepackage{dlm}
+output:
+    pdf_document: default
+    html_document:
+    fig_caption: yes
+    fig_height: 6
+                 
+---
+      
+      
+```{r setup, echo=F, message=F, warning = F}
+knitr::opts_chunk$set(message = FALSE,
+                      results = FALSE,
+                      warning = FALSE,
+                      echo = FALSE,
+                      fig.align = "center")
+
+set.seed(2020)
+#libraries
+library(depmixS4)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+# library(rgeos)
+library(ggrepel)
+library(tidyverse)
+library(ggplot2)
+library(dlm)
+library(car)
+Sys.setlocale("LC_TIME", "en_US.UTF-8")
+theme_set(theme_bw())
+
+```
+
+# INTRODUCTION
+
+This paper delves into the analysis of air quality data, focusing on PM2.5 levels collected from station 96 of the U.S. Environmental Protection Agency (EPA), located along the U.S. West Coast during the summer of 2020.
+Given the inherent temporal dependencies in PM2.5 levels, our approach employs time series models to effectively capture these dynamics. Leveraging these models, we aim to discern varying pollution levels, generate real-time forecasts for streaming data, and explore spatial dependencies among different monitoring stations.
+
+
+```{r}
+original_data <- read.csv("C:/Users/delfr/OneDrive/Desktop/DSBA/2.6 Time series analysis for economic-financial data/Final Project/First part/ts_epa_2020_west_sept_fill.csv", header=FALSE)
+names(original_data) <- original_data[1,] #Assign the first row as column names
+original_data <- original_data[-1,] #Remove the first row
+```
+
+The dataset consists in hourly data from 10 Californian stations spanning from June 1st to September 30th, 2020, encompassing a total of 29,280 observations, with no missing values. Among these, 2,928 observations originate from station 96.
+The variables under scrutiny include station ID, longitude, latitude, datetime (timestamp in GMT timezone), pm25 (particulate matter of size 2.5 micrograms per cubic meter or less), temperature (in Celsius), and wind speed (measured in knots per second).
+
+# EXPLORATORY DATA ANALYSIS
+
+```{r, fig.width=6, fig.height=6}
+station_96_df <- original_data %>% 
+  filter(station_id == "96")
+station_96_df$datetime <- as.POSIXct(station_96_df$datetime)
+plot(station_96_df$datetime, station_96_df$pm25, type="o", pch=19, cex=.3, cex.main = 0.8, xlab = "Time (t)", ylab = "PM2.5 levels", main="PM2.5 levels at Station #96")
+```
+
+```{r, fig.width=7, fig.height=8}
+# Arrange plots in 3 rows and 1 column
+par(mfrow=c(3,1)) 
+
+# Plot for PM2.5 levels
+plot(station_96_df$datetime, station_96_df$pm25, 
+     type="o", pch=19, cex=.4, cex.main = 0.8, 
+     xlab = "Time (t)", ylab = "PM2.5 Value", 
+     main="PM2.5 levels at Station #96")
+
+# Plot for temperature
+plot(station_96_df$datetime, station_96_df$temp, 
+     type="o", pch=19, cex=.4, cex.main = 0.8, 
+     xlab = "Time (t)", ylab = "Temperature Value", 
+     main="Temperature at Station #96")
+
+# Plot for temperature
+plot(station_96_df$datetime, station_96_df$wind, 
+     type="o", pch=19, cex=.4, cex.main = 0.8, 
+     xlab = "Time (t)", ylab = "Wind Value", 
+     main="Wind at Station #96")
+
+```
+
+The time plot of PM2.5 levels, wind speed and temperature (Figure 1) reveals that these three environmental variables exhibit parallel patterns and simultaneous shocks. For instance, the spike in PM2.5 levels observed at the beginning of September 2020 coincides with a drastic decrease in temperature, suggesting a potential causal relationship. 
+```{r}
+temperature <- ts(station_96_df$temp)
+wind_speed <- ts(station_96_df$wind)
+pm25_levels <- ts(station_96_df$pm25)
+data_for_corr <- data.frame(temperature, wind_speed, pm25_levels)
+data_for_corr$temperature <- as.numeric(data_for_corr$temperature)
+data_for_corr$wind_speed <- as.numeric(data_for_corr$wind_speed)
+data_for_corr$pm25_levels <- as.numeric(data_for_corr$pm25_levels)
+
+# Calculate correlation matrix
+correlation_matrix <- cor(data_for_corr)
+print(correlation_matrix)
+```
+The above associations are quantified in the correlation matrix, which indicates a negative association between temperature and wind (-0.28), while also revealing a very weak correlation between PM2.5 levels and both wind and temperatures (0.06 and 0.03, respectively).
+The time series exhibits non-stationary behavior, as mean and variance are not constant.
+
+
+To analyse the correlation between the series and its own lagged values at different time lags, the Autocorrelation Function (ACF) is produced.
+
+```{r, fig.width=5, fig.height=5}
+
+pm25_levels <- ts(as.numeric(station_96_df$pm25))
+
+par(mfrow = c(2, 1))
+# Plot the ACF
+acf(pm25_levels, main="", lag.max = 100)
+title(main = "Autocorrelation Function of PM2.5 Levels", cex.main = 0.8)
+
+pacf(pm25_levels, main="")
+title(main = "Partial Autocorrelation Function of PM2.5 Levels", cex.main = 0.8)
+
+```
+
+
+To analyse the correlation between the series and its own lagged values at different time lags, the Autocorrelation Function (ACF) is produced. The plot reveals a steadily decrease in autocorrelation, indicative of an autoregressive (AR) process.
+On the other hand, the PACF, which also controls for the effects of shorter lags, shows a high value at lag 1, a significant negative value at lag 2 and a noticeable, though weaker, influence of lags 3, 4 and 5 on the current value. These observations suggest a AR(5) model, with some potential negative autoregressive parameters. 
+Moreover, the temporal dependencies within the variable of interest are further examined using a lag plot of PM2.5 levels for lags 1, 2, and 3.
+
+
+```{r lagPlot, out.width='50%'}
+pm25_levels <- ts(as.numeric(station_96_df$pm25))
+lag.plot(pm25_levels, lag=3, do.lines=F, cex.lab = 0.6, main = "Lag Plots of PM2.5 Levels")
+```
+
+
+The plot reveals a clustering of data points along the diagonal line, indicating again a degree of autocorrelation within the data. However, as the lag increases, the density of points along this diagonal diminishes, suggesting a weakening autocorrelation strength with increasing time intervals between observations. These patterns imply that past values possess some predictive capability for future values, a foundational premise in time series analysis. It suggests that the data is not purely stochastic but may exhibit underlying patterns that can be modelled. Additionally, deviations from the diagonal line, particularly evident at higher lags, hint at potential non-linearities in the data.
+
+Furthermore, day, week, and month decompositions of time series of PM2.5 levels are produced.
+
+```{r}
+
+par(mfrow = c(3, 1))
+# Frequency for 1 month
+montly_decomposition <- decompose(ts(pm25_levels, frequency = (168*4)))
+plot(montly_decomposition)
+title(main = "Decomposition (Monthly)", outer=TRUE)
+
+#frequency for 1 week (168 hours) 
+weekly_decomposition <- decompose(ts(pm25_levels, frequency = (168)))
+plot(weekly_decomposition)
+title(main = "Decomposition (Weekly)", outer=TRUE)
+
+#frequency for 1 day (24 hours) 
+daily_decomposition <- decompose(ts(pm25_levels, frequency = (24)))
+plot(daily_decomposition)
+title(main = "Decomposition (Daily)", outer=TRUE)
+
+
+```
+
+
+
+```{r, fig.width=6, fig.height=6}
+# Perform time series decomposition for daily frequency (24 hours)
+ts_daily <- ts(pm25_levels, frequency = 24)
+decomp_daily <- decompose(ts_daily)
+residuals_daily <- decomp_daily$random
+
+# Perform time series decomposition for weekly frequency (168 hours)
+ts_weekly <- ts(pm25_levels, frequency = 168)
+decomp_weekly <- decompose(ts_weekly)
+residuals_weekly <- decomp_weekly$random
+
+# Perform time series decomposition for weekly frequency (168 hours)
+ts_monthly <- ts(pm25_levels, frequency = 168*4)
+decomp_monthly <- decompose(ts_monthly)
+residuals_monthly <- decomp_monthly$random
+
+# Plot ACF and PACF of residuals for daily frequency
+par(mfrow=c(2,1))
+residuals_daily <- na.omit(residuals_daily)
+acf(residuals_daily, main="ACF of Residuals (Daily)")
+pacf(residuals_daily, main="PACF of Residuals (Daily)")
+
+# Plot ACF and PACF of residuals for weekly frequency
+par(mfrow=c(2,1))
+residuals_weekly <- na.omit(residuals_weekly)
+acf(residuals_weekly, main="ACF of Residuals (Weekly)")
+pacf(residuals_weekly, main="PACF of Residuals (Weekly)")
+
+# Plot ACF and PACF of residuals for monthly frequency
+par(mfrow=c(2,1))
+residuals_monthly <- na.omit(residuals_monthly)
+acf(residuals_monthly, main="ACF of Residuals (Monthly)")
+pacf(residuals_monthly, main="PACF of Residuals (Monthly)")
+```
+The daily decomposition yields less autocorrelation in its residuals, as observed in the ACF and PACF plots of the residuals, suggesting a more effective modeling of the data's underlying patterns at the daily frequency.
+
+# MODELLING
+
+## HIDDEN MARKOV MODEL
+
+To identify different levels of pollution and predict persistence or decrease of its levels, a Hidden Markov Model is employed, as it allows to model change points and transitions between different states.
+
+To formalize, a hidden Markov model is a discrete-time stochastic process $((Y_t, S_t))_t$, where the observable time series $(Y_t)_{t\geq1}$ depends on the state of a non-observable hidden process, $(S_t)_{t\geq0}$, called state process. In this application, the time series $(Y_t)_{t\geq1}$ is given by the observed PM2.5 concentrations, which depend on the state process $(S_t)_{t\geq0}$, modelled as a homogeneous Markov chain, with state space $S$=\{1,2,..,k\}. The emission distribution, namely the distribution of the observable variable $Y_t$ given the state $S_t=j$ for j=1,2,..,k is assumed to be Gaussian with state-specific parameters.
+
+
+*HMM with 2 states*
+
+Let's first use a Hidden Markov Model with 2 states, representing low and high levels of emissions, with a Gaussian emission distribution, with state-dependent mean and variance. The process can be described as follows:
+\[
+Y_t = \begin{cases} 
+\mu_1 + \epsilon_t, & \text{if } S_t = 1 \\
+\mu_2 + \epsilon_t, & \text{if } S_t = 2 \\ 
+\end{cases}
+\]
+
+where \( \epsilon_t \) are independently and identically distributed as \( \mathcal{N}(0, \sigma^2_1) \) if the state \( S_t = 1 \), as \( \mathcal{N}(0, \sigma^2_2) \) if the state \( S_t = 2 \).
+
+
+```{r}
+y <- as.numeric(ts(station_96_df$pm25))
+hmm1 <- depmix(y ~ 1, data=data.frame(y), nstates=2)
+hmm1
+```
+```{r}
+fitted_hmm1 <- fit(hmm1)
+summary(fitted_hmm1)
+```
+
+```{r}
+MLE_se_hmm1=standardError(fitted_hmm1)
+MLE_se_hmm1$par
+```
+
+```{r, fig.width=3, fig.height=3}
+estimated_states_hmm1 <- posterior(fitted_hmm1)
+plot(y, estimated_states_hmm1[,1], cex=.3, xlab = "Time (t)", ylab = "States", main="Estimated states - HMM with 2 states", cex.main = 0.8)
+```
+
+
+```{r,fig.width=4, fig.height=4}
+i <- estimated_states_hmm1[1, 1]
+ii <- if(i == 1) {i + 1} else {i - 1}
+
+estimated_mean1_hmm1 <- fitted_hmm1@response[[i]][[1]]@parameters$coefficients
+estimated_mean2_hmm1 <- fitted_hmm1@response[[ii]][[1]]@parameters$coefficients
+estimated_means_hmm1 <- rep(estimated_mean1_hmm1, length(station_96_df$pm25))
+estimated_means_hmm1[estimated_states_hmm1[, 1] == ii] <- estimated_mean2_hmm1
+
+# Plot with time on the x-axis
+plot(station_96_df$datetime, station_96_df$pm25, type = 'o', xlab = "Time (t)", ylab = "PM2.5 levels", cex=0.2)
+title(main = "PM2.5 levels and HMM estimated means - 2 states", cex.main = 0.8)
+
+# Add estimated means to the plot
+points(station_96_df$datetime, estimated_means_hmm1, col = "red", cex = 0.3)
+
+``` 
+
+```{r, fig.width=3, fig.height=3}
+results_hmm1 <- data.frame(time_index=as.numeric(time(y)),
+sample_trajectory=y,
+estimated_state=estimated_states_hmm1[,1])%>%
+gather("variable", "value", -time_index)
+plotobj <- ggplot(results_hmm1, aes(time_index, value)) +
+geom_line() + facet_wrap(variable ~ ., scales="free", ncol=1) +
+theme_minimal()
+plot(plotobj)
+```
+This approach proved inadequate in capturing the full spectrum of variability present in the dataset. Notably, the highest state, observed at around 25 micrograms per cubic meter, corresponds to the actual prescribed limit.
+
+*HMM with 3 states*
+
+
+Perhaps a Hidden Markov Model with 3 states might better capture the dynamics, representing low, medium and high levels of emissions, again with a Gaussian emission distribution, with state-dependent mean and variance. The process can be described as follows:
+\[
+Y_t = \begin{cases} 
+\mu_1 + \epsilon_t, & \text{if } S_t = 1 \\
+\mu_2 + \epsilon_t, & \text{if } S_t = 2 \\
+\mu_3 + \epsilon_t, & \text{if } S_t = 3 \\
+\end{cases}
+\]
+
+where \( \epsilon_t \) are independently and identically distributed as \( \mathcal{N}(0, \sigma^2_1) \) if the state \( S_t = 1 \), as \( \mathcal{N}(0, \sigma^2_2) \) if the state \( S_t = 2 \) and as as \( \mathcal{N}(0, \sigma^2_3) \) if the state \( S_t = 3 \).
+
+
+```{r}
+hmm2 <- depmix(y ~ 1, data=data.frame(y), nstates=3)
+hmm2
+```
+
+```{r}
+fitted_hmm2 <- fit(hmm2)
+summary(fitted_hmm2)
+```
+
+```{r}
+MLE_se_hmm2=standardError(fitted_hmm2)
+MLE_se_hmm2$par
+```
+
+```{r, fig.width=3, fig.height=3}
+estimated_states_hmm2 <- posterior(fitted_hmm2)
+plot(y, estimated_states_hmm2[,1], cex=.3, xlab = "Time (t)", ylab = "States", main="Estimated states - HMM with 3 states", cex.main = 0.8)
+```
+
+```{r, fig.width=4, fig.height=4}
+# Initialize variables
+estimated_means_hmm2 <- rep(NA, length(station_96_df$pm25))
+
+# Iterate through each state
+for (i in unique(estimated_states_hmm2[, 1])) {
+  # Determine the next state
+  if (i == 1) {
+    ii <- 2
+  } else if (i == 2) {
+    ii <- 3
+  } else {
+    ii <- 1
+  }
+  
+  # Extract coefficients for the current and next state
+  estimated_mean1_hmm2 <- fitted_hmm2@response[[i]][[1]]@parameters$coefficients
+  estimated_mean2_hmm2 <- fitted_hmm2@response[[ii]][[1]]@parameters$coefficients
+  
+  # Update estMeans1 based on the state
+  estimated_means_hmm2[estimated_states_hmm2[, 1] == i] <- estimated_mean1_hmm2
+  estimated_means_hmm2[estimated_states_hmm2[, 1] == ii] <- estimated_mean2_hmm2
+}
+
+
+# Plot with time on the x-axis
+plot(station_96_df$datetime, station_96_df$pm25, type = 'o', xlab = "Time (t)", ylab = "PM2.5 levels", cex=0.2)
+title(main = "PM2.5 levels and HMM estimated means - 3 states", cex.main = 0.8)
+
+# Add estimated means to the plot
+points(station_96_df$datetime, estimated_means_hmm2, col = "red", cex = 0.3)
+``` 
+
+
+```{r, fig.width=3, fig.height=3}
+results_hmm2 <- data.frame(time_index=as.numeric(time(y)),
+sample_trajectory=y,
+estimated_state=estimated_states_hmm2[,1])%>%
+gather("variable", "value", -time_index)
+plotobj <- ggplot(results_hmm2, aes(time_index, value)) +
+geom_line() + facet_wrap(variable ~ ., scales="free", ncol=1) +
+theme_minimal()
+plot(plotobj)
+```
+Despite this refinement, the high state remained centered near the limit, at 26.564 micrograms per cubic meter.
+
+*HMM with 4 states*
+
+
+Since very high level are not captured by the previous Hidden Markov Model, a new one with 4 states is fitted, to represent low, medium, high and super high levels of emissions, again with a Gaussian emission distribution, with state-dependent mean and variance. The process now can be described as follows:
+
+$$
+Y_t = 
+\begin{cases}
+\mu_1 + \epsilon_t \ \  \ \ \ \  \epsilon_t \overset{\text{iid}}{\sim} N(0,\sigma_1^2) \ \ & \text{if state } S_t = 1 \\
+\mu_2 + \epsilon_t \ \  \ \ \ \   \epsilon_t \overset{\text{iid}}{\sim} N(0,\sigma_2^2) \ \ & \text{if state } S_t = 2 \\
+\mu_3 + \epsilon_t \ \  \ \ \ \   \epsilon_t \overset{\text{iid}}{\sim} N(0,\sigma_3^2) \ \ & \text{if state } S_t = 3 \\
+\mu_4 + \epsilon_t \ \  \ \ \ \   \epsilon_t \overset{\text{iid}}{\sim} N(0,\sigma_4^2) \ \ & \text{if state } S_t = 4 \\
+\end{cases}
+$$
+
+where \( \epsilon_t \) are independently and identically distributed as \( \mathcal{N}(0, \sigma^2_1) \) if the state \( S_t = 1 \), as \( \mathcal{N}(0, \sigma^2_2) \) if the state \( S_t = 2 \), as \( \mathcal{N}(0, \sigma^2_3) \) if the state \( S_t = 3 \) and as \( \mathcal{N}(0, \sigma^2_4) \) if the state \( S_t = 4 \).
+
+```{r}
+hmm3 <- depmix(y ~ 1, data=data.frame(y), nstates=4)
+hmm3
+```
+
+```{r}
+fitted_hmm3 <- fit(hmm3)
+summary(fitted_hmm3)
+```
+
+The estimated mean for the high-emission state (State 4) is 36.535, with a standard deviation of 13.812. In contrast, the low-emission state (State 2) has an estimated mean of 13.689, with a standard deviation of 0.883. This indicates that higher emission levels are associated with significantly greater variability. Additionally, the estimated initial probability law $\pi$ of $S_0$ indicates that the system starts in State 1 (the mid-low scenario) with a probability of 100\%, which reflects the observed temporal pattern of the data.
+
+```{r}
+MLE_se_hmm3=standardError(fitted_hmm3)
+MLE_se_hmm3$par
+```
+
+```{r, fig.width=3, fig.height=3}
+estimated_states_hmm3 <- posterior(fitted_hmm3)
+plot(y, estimated_states_hmm3[,1], cex=.3, xlab = "Time (t)", ylab = "States", main="Estimated states - HMM with 4 states", cex.main = 0.8)
+```
+```{r,fig.width=6, fig.height=6}
+# Initialize variables
+estimated_means_hmm3 <- rep(NA, length(station_96_df$pm25))
+
+# Iterate through each state
+for (i in unique(estimated_states_hmm3[, 1])) {
+  # Determine the next state
+  if (i == 1) {
+    ii <- 2
+  } else if (i == 2) {
+    ii <- 3
+  } else if (i == 3) {
+    ii <- 4
+  } else {
+    ii <- 1
+  }
+  
+  # Extract coefficients for the current and next state
+  estimated_mean1_hmm3 <- fitted_hmm3@response[[i]][[1]]@parameters$coefficients
+  estimated_mean2_hmm3 <- fitted_hmm3@response[[ii]][[1]]@parameters$coefficients
+  
+  # Update estMeans1 based on the state
+  estimated_means_hmm3[estimated_states_hmm3[, 1] == i] <- estimated_mean1_hmm3
+  estimated_means_hmm3[estimated_states_hmm3[, 1] == ii] <- estimated_mean2_hmm3
+}
+
+# Plot with time on the x-axis
+plot(station_96_df$datetime, station_96_df$pm25, type = 'o', xlab = "Time (t)", ylab = "PM2.5 levels", cex=0.2)
+title(main = "PM2.5 levels and HMM estimated means - 4 states", cex.main = 0.8)
+
+# Add estimated means to the plot
+points(station_96_df$datetime, estimated_means_hmm3, col = "red", cex = 0.3)
+```
+
+estimated_means_hmm3
+
+```{r, fig.width=6, fig.height=6}
+results_hmm3 <- data.frame(time_index=as.numeric(time(y)),
+sample_trajectory=y,
+estimated_state=estimated_states_hmm3[,1])%>%
+gather("variable", "value", -time_index)
+plotobj <- ggplot(results_hmm3, aes(time_index, value)) +
+geom_line() + facet_wrap(variable ~ ., scales="free", ncol=1) +
+theme_minimal()
+plot(plotobj)
+```
+ In addition to yielding a higher log-likelihood, this model effectively captured pollution levels exceeding the prescribed limit, specifically around 36 micrograms per cubic meter.
+
+
+
+## DYNAMIC LINEAR MODEL
+
+Accurately estimating and forecasting streaming data in the scenario under study is crucial for timely implementing effective mitigation strategies. One highly effective approach to address this challenge involves the application of state space models, particularly dynamic linear models. Indeed, while Hidden Markov Models (HMMs), assuming a finite number of hidden states, excel in identifying distinct pollution levels and modeling transitions between them, DLMs offer greater flexibility by allowing for continuous state space and are particularly useful for scenarios where real-time forecasting is essential, due to the sequential updating of parameters and states based on incoming data.
+
+
+The modelling approach consists in a random walk plus noise, represented by the following system of equations:
+
+\[
+\begin{cases}
+    y_t = \theta_t + v_t, & \text{where } v_t \sim \text{N}(0, \sigma_v^2) \\
+    \theta_t = \theta_{t-1} + w_t, & \text{where } w_t \sim \text{N}(0, \sigma_w^2)
+\end{cases}
+\]
+
+
+with $\theta_0 \sim N(m_0, C_0)$ and $\theta_0  \perp (w_t) \perp (v_t)$ both within them and between them.
+
+Before advancing to the modeling steps, a series of elaborations will be conducted on the data. Due to the presence of sharp peaks in the data, a logarithmic transformation is applied. As a result, the range of values is compressed, shrinking larger values while expanding smaller ones. Despite this transformation, the underlying data appears to maintain its inherent structure.
+In addition, to mitigate the effects of noise and irregularities present in hourly data, experimentation with coarser scales is conducted, namely 12, 24, 36 and 48-hour averages. In the proceeding analysis, the latter option is utilized, as it yields uncorrelated model residuals. 
+
+```{r, fig.width=6, fig.height=6}
+log_pm25 <- log(as.numeric(station_96_df$pm25))
+pm25 <- as.numeric(station_96_df$pm25)
+
+# Convert datetime column to POSIXct format
+pm25_df <-data.frame(datetime = station_96_df$datetime, pm25 = pm25)
+pm25_df$datetime <- as.POSIXct(station_96_df$datetime)
+# Create 12-hour intervals for original data
+pm25_df$interval <- cut(pm25_df$datetime, breaks = "48 hours")
+
+# Create data frames for original and log-transformed data
+pm25_df <- data.frame(datetime = pm25_df$datetime, pm25 = as.numeric(station_96_df$pm25), interval = pm25_df$interval)
+log_pm25_df <- data.frame(datetime = pm25_df$datetime, log_pm25 = log_pm25, interval = pm25_df$interval)
+
+# Aggregate by intervals and compute the mean for original data
+averages_pm25_df <- aggregate(pm25 ~ interval, data = pm25_df, FUN = mean)
+
+# Aggregate by intervals and compute the mean for log-transformed data
+log_averages_pm25_df <- aggregate(log_pm25 ~ interval, data = log_pm25_df, FUN = mean)
+```
+
+```{r, fig.width=6, fig.height=6}
+# Set up a 2x2 layout for four plots
+par(mfrow = c(2, 2))
+
+# Plot 1: Original PM2.5 concentrations
+plot(pm25_df$datetime, pm25_df$pm25, type = "l", col = "black", xlab = "Time", ylab = "PM2.5", main = "Original PM2.5 Levels", cex.main = 0.9)
+
+# Plot 2: Log-transformed PM2.5 concentrations
+plot(log_pm25_df$datetime, log_pm25_df$log_pm25, type = "l", col = "black", xlab = "Time", ylab = "Log PM2.5", main = "Log-transformed PM2.5 Levels", cex.main = 0.9)
+
+# Plot 3: Averages of original PM2.5 concentrations
+plot(averages_pm25_df$interval, averages_pm25_df$pm25, type = "l", col = "green", xlab = "Time Interval", ylab = "Average PM2.5", main = "Averages of Original PM2.5 Levels", cex.main = 0.9)
+lines(averages_pm25_df$interval, averages_pm25_df$pm25, col = "black")
+
+# Plot 4: Averages of log-transformed PM2.5 concentrations
+plot(log_averages_pm25_df$interval, log_averages_pm25_df$log_pm25, type = "l", col = "purple", xlab = "Time Interval", ylab = "Average Log PM2.5", main = "Averages of Log-transformed PM2.5 Levels", cex.main = 0.9)
+lines(log_averages_pm25_df$interval, log_averages_pm25_df$log_pm25, col = "black")
+```
+
+
+```{r}
+# Frequency for 48 hours
+ts <- ts(as.numeric(station_96_df$pm25), frequency = 48)
+
+# Compute the length of the time series 'ts'
+length(ts)
+
+# Decompose the time series 'ts' into seasonal, trend, and random components
+dec <- decompose(ts)
+
+# Plot the decomposed components with no x-axis ticks
+plot(dec, xaxt = "n", col.main = rgb(0, 0, 0, alpha = 0))
+
+# Extract unique months from the 'datetime' column in 'station_96_df'
+months <- unique(format(station_96_df$datetime, "%Y-%m"))
+
+# Create labels for the x-axis using the format "Month Year"
+labels <- format(as.Date(paste(months, "01", sep="-")), "%b %Y")
+
+# Determine positions for x-axis ticks
+positions <- seq(1, length(ts)/48, by = 15)
+
+## Calculate middle values between positions for x-axis ticks
+#for (i in 1:(length(positions) - 1)) {
+#  middle_values[i] <- (positions[i] + positions[i + 1]) / 2
+#}
+
+# Add x-axis ticks with customized labels
+#axis(1, at = middle_values, labels = labels, cex.axis = 0.7, lwd=0)
+
+# Add title to the plot
+title(main = "48-hour decomposition of PM2.5 concentrations", adj = 0.5)
+
+
+```
+
+
+```{r}
+# Define a function to build a random walk model
+buildrw <- function(param){
+  dlmModPoly(order=1, dV=param[1], dW=param[2], m0=log_averages_pm25_df$log_pm25[1])
+}
+
+# Use the Simulated Annealing algorithm to estimate parameters for different initial values
+MLE1 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(0.001,0.001), buildrw, method="SANN", lower = c(0.0001, 0), hessian=T)
+MLE2 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(0.01,0.01), buildrw, method="SANN", lower = c(0.0001, 0), hessian=T)
+MLE3 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(0.1,0.1), buildrw, method="SANN", lower = c(0.0001, 0), hessian=T)
+MLE4 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(1,1), buildrw, method="SANN", lower = c(0.0001, 0), hessian=T)
+
+
+# Print the MLE values for different parameter initializations
+print("MLE and loglikelihood for different initial values using Simulated Annealing:")
+print("(0.001, 0.001)")
+print(c(MLE1$par, MLE1$value))
+print("(0.01, 0.01)")
+print(c(MLE2$par, MLE2$value))
+print("(0.1, 0.1)")
+print(c(MLE3$par, MLE3$value))
+print("(1, 1)")
+print(c(MLE4$par, MLE4$value))
+
+# Identify the best MLE value
+print("Index with minimum value")
+which.min(c(MLE1$value, MLE2$value, MLE3$value, MLE4$value))
+
+# The best is MLE2
+
+# Use the L-BFGS-B algorithm to estimate parameters for different initial values
+BFGS_MLE1 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(0.001,0.001), buildrw, method="L-BFGS-B", lower = c(0.0001, 0), hessian=T)
+BFGS_MLE2 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(0.01,0.01), buildrw, method="L-BFGS-B", lower = c(0.0001, 0), hessian=T)
+BFGS_MLE3 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(0.1,0.1), buildrw, method="L-BFGS-B", lower = c(0.0001, 0), hessian=T)
+BFGS_MLE4 <- dlmMLE(log_averages_pm25_df$log_pm25, parm = c(1,1), buildrw, method="L-BFGS-B", lower = c(0.0001, 0), hessian=T)
+
+# Print the MLE values for different parameter initializations
+print("MLE and loglikelihood for different initial values using standard algorithm:")
+print("(0.001, 0.001)")
+print(c(BFGS_MLE1$par, BFGS_MLE1$value))
+print("(0.01, 0.01)")
+print(c(BFGS_MLE2$par, BFGS_MLE2$value))
+print("(0.1, 0.1)")
+print(c(BFGS_MLE3$par, BFGS_MLE3$value))
+print("(1, 1)")
+print(c(BFGS_MLE4$par, BFGS_MLE4$value))
+
+
+# Identify the best MLE value
+print("Index with minimum value")
+which.min(c(BFGS_MLE1$value, BFGS_MLE2$value, BFGS_MLE3$value, BFGS_MLE4$value))
+
+# The best is BFGS_MLE2
+
+# Print MLE2 and BFGS_MLE2
+print("BEST PARAMETERS:")
+print(MLE2)
+print(BFGS_MLE2)
+
+## Since results are almost the same, let's choose the default algorithm, which is BFGS_MLE2
+```
+As a first step, maximum likelihood estimation is performed to estimate the unknown parameters of the model of interest, $\sigma^2_v$ and $\sigma^2_w$. Parameter inference and predictions is conducted using the same data, a practice that can lead to overfitting in predictions. However, in the context of state models, this approach is often employed. We employed two optimization algorithms: the default L-BFGS-B algorithm and Simulated Annealing. While the first is better suited for global optimization problems where the objective function may have multiple minima, the second is more appropriate for local optimization of smooth, convex functions. Despite this difference, both algorithms returned approximately the same optimum value in our application. Thus, we opted for the default algorithm.
+Additionally, lower bounds for the variances were set at \(\sigma^2_v \geq 0.0001\) and \(\sigma^2_w \geq 0\). Several sets of initial parameter values were tested, including \((0.001, 0.001)\), \((0.01, 0.01)\), \((0.1, 0.1)\), \((1, 1)\). The likelihood was optimized with the parameter values \((0.1, 0.1)\), though the estimates and likelihood values for all tested cases were nearly identical, with differences as minimal as 0.0001.
+
+```{r}
+# Compute the asymptotic covariance matrix of the maximum likelihood estimators (MLEs) using the inverse of the Hessian matrix
+AsymCov = solve(BFGS_MLE2$hessian)
+
+# Display the Hessian matrix from the BFGS_MLE2 object
+BFGS_MLE2$hessian
+
+```
+
+```{r}
+# Compute the standard errors of the maximum likelihood estimators (MLEs) by taking the square root of the diagonal elements of the asymptotic covariance matrix
+sqrt(diag(AsymCov))
+
+```
+
+To quantify the uncertainty in the estimated parameters, the asymptotic covariance matrix of the estimates is computed as the inverse of the Hessian matrix obtained during the optimization process and that contains the second-order partial derivatives of the negative log-likelihood function with respect to the parameters. The standard errors of the MLEs are computed by extracting the square root of the diagonal elements of the asymptotic covariance matrix.
+
+```{r, out.width='60%'}
+BFGS_MLE2$par[1] 
+BFGS_MLE2$par[2]
+```
+The MLE of $\sigma^2_w$ is 0.0064 with a standard error of 0.0070, while the MLE of $\sigma^2_v$ is 0.0247 with a standard error of 0.0097. This indicates that the underlying state is relatively stable while the observed data are subject to higher random fluctuations.
+Since the observation noise is greater than the variability in the true signal over time, the signal-to-noise ratio is estimated to be smaller than 1, specifically 0.26. This ratio influences the adaptive coefficient. Consequently, the model will place less trust in the observations and adapt more slowly to changes in the observed data, providing smooth state estimates as it assumes the true state is relatively stable and changes are more likely due to observation noise.
+
+```{r}
+# Calculate 95% confidence intervals for the variances of the model parameters
+
+# Calculate the lower and upper bounds for sigma_v with a constraint that they cannot be lower than 0
+conf_interval_sigma_v_lower <- max(BFGS_MLE2$par[1] - 1.96 * sqrt(diag(AsymCov))[1], 0)
+conf_interval_sigma_v_upper <- BFGS_MLE2$par[1] + 1.96 * sqrt(diag(AsymCov))[1]
+conf_interval_sigma_v <- c(conf_interval_sigma_v_lower, conf_interval_sigma_v_upper)
+conf_interval_sigma_v <- round(conf_interval_sigma_v, 2)
+
+# Calculate the lower and upper bounds for sigma_w with a constraint that they cannot be lower than 0
+conf_interval_sigma_w_lower <- max(BFGS_MLE2$par[2] - 1.96 * sqrt(diag(AsymCov))[2], 0)
+conf_interval_sigma_w_upper <- BFGS_MLE2$par[2] + 1.96 * sqrt(diag(AsymCov))[2]
+conf_interval_sigma_w <- c(conf_interval_sigma_w_lower, conf_interval_sigma_w_upper)
+conf_interval_sigma_w <- round(conf_interval_sigma_w, 2)
+
+# Print 95% confidence intervals for sigma_v and sigma_w
+print(paste("95% Confidence Interval for sigma_v:", conf_interval_sigma_v))
+print(paste("95% Confidence Interval for sigma_w:", conf_interval_sigma_w))
+
+```
+
+```{r, out.width='60%'}
+# Create a dynamic linear model (DLM) with polynomial trend component
+mod <- dlmModPoly(1, dV = BFGS_MLE2$par[1], dW = BFGS_MLE2$par[2])
+
+# Apply the DLM filter to the log-transformed PM2.5 data to estimate unobserved states
+outFilt <- dlmFilter(log_averages_pm25_df$log_pm25, mod)
+
+```
+
+The one-step-ahead forecasts are:
+
+```{r}
+# Extract the filtered state estimates from the DLM output, removing the first element
+estimates1 <- dropFirst(outFilt$f)
+
+# Compute the variance-covariance matrix of the filtered states using singular value decomposition (SVD)
+listC1 <- dlmSvd2var(outFilt$U.R, outFilt$D.R)
+
+# Compute the square root of the diagonal elements of the variance-covariance matrix
+sqrtC1 <- sqrt(unlist(listC1))
+
+# Compute the lower bounds of the 95% confidence intervals for the state estimates
+ci_lower1 <- estimates1 - 1.96 * sqrtC1[-1]
+
+# Compute the upper bounds of the 95% confidence intervals for the state estimates
+ci_upper1 <- estimates1 + 1.96 * sqrtC1[-1]
+
+
+plot(log_averages_pm25_df$interval, log_averages_pm25_df$log_pm25, type = "l", col = "black", lwd = 1,
+     main = "One-Step-Ahead Forecasts and Credible Intervals of log-transformed averaged PM2.5 Levels", cex.main = 0.7,
+     xlab = "Time", ylab = "Log-averaged PM2.5 Levels",
+     ylim = c(min(ci_lower1, na.rm = TRUE), max(ci_upper1, na.rm = TRUE)))
+
+lines(log_averages_pm25_df$interval, log_averages_pm25_df$log_pm25, col = "black", lwd = 2)
+
+# Add the estimates to the plot
+lines(estimates1, col = "red", lwd = 2)
+# Add the lower and upper credible intervals
+lines(ci_lower1, col = "blue", lty = 2)
+lines(ci_upper1, col = "blue", lty = 2)
+
+# Adding a legend to clarify the plot elements
+legend("bottomright", legend = c("Observations", "Estimates", "95% CI Lower", "95% CI Upper"),
+       col = c("black", "red", "blue", "blue"), lty = c(1, 1, 2, 2), lwd = c(2, 2, 2, 2), cex=0.55)
+
+```
+
+Next, the MLEs are plugged in the dynamic linear model and one-step-ahead forecasts are computed. By aggregating data into 48-hour averages, short-term fluctuations are smoothed out, allowing the model to focus on capturing and predicting the underlying trends. \\
+The forecasts exhibit a close correspondence with the observed data trends, suggesting that the model accurately captures the general patterns and fluctuations in PM2.5 levels. 
+Despite the overall accuracy of the forecasts, significant deviations are observed where the model appears to lag in response to the peaks observed towards the end of summer 2020. This lag can be attributed to the sudden and disruptive nature of the fire-induced shock, which perturbs the typical patterns and assumptions of the state space model, including constant variance. Consequently, the model encounters challenges in accurately predicting the affected portion of the time series, as the random walk plus noise framework struggles to account for substantial deviations from the anticipated trajectory. Furthermore, the adaptive coefficient's influence results in forecasts adapting more gradually to changes.
+
+
+To check model validity, forecast errors are analyzed. In particular, a plot of the autocorrelation function (ACF) is generated to verify the assumption of independence of the residuals. Autocorrelated residuals violate the assumption of independence, potentially resulting in inaccurate statistical inference. As previously mentioned, uncorrelated residuals were achieved only after averaging the results over 36 and 48 hours, indicating that short-term fluctuations were the primary cause of autocorrelation.
+
+```{r, fig.width=4, fig.height=6}
+tsdiag(outFilt)
+```
+
+The plot of the autocorrelation function (ACF) and the p-values of the Ljung-Box reveal no significant correlation, indicating that the assumption of independence among residuals is once again met. Thus, we are satisfied with the validity of the model.
+
+```{r, out.width='60%'}
+standardized_errors <- residuals(outFilt)$res
+standaradized_innovations <- as.numeric(standardized_errors)
+qqPlot(standaradized_innovations, main="QQ Plot")
+
+```
+Moreover, to check the assumption that model's residuals follow a Gaussian distribution, a QQ plot is produced. The plot reveals that the standardized innovations follow the reference line, especially in the center of the distribution. However, there are some deviations, particularly in the tails of the distribution, indicating that the distribution assigns different probabilities to the tails compared to the Gaussian distribution. Such deviations may imply that the Normality assumption could be overly restrictive or that the local level model might be too simplistic for the time series being analyzed.
+
+## SPATIO-TEMPORAL ANALYSIS
+
+
+This section expands on the previous model by incorporating multiple stations, allowing for the analysis of spatial dependencies among them. Specifically, data from stations 41, 47, 96, 99 will be jointly modelled.
+
+```{r, fig.width=6, fig.height=6}
+station_41_df <- original_data %>% 
+  filter(station_id == "41")
+station_41_df$datetime <- as.POSIXct(station_41_df$datetime)
+
+station_47_df <- original_data %>% 
+  filter(station_id == "47")
+station_47_df$datetime <- as.POSIXct(station_47_df$datetime)
+
+station_99_df <- original_data %>% 
+  filter(station_id == "99")
+station_99_df$datetime <- as.POSIXct(station_99_df$datetime)
+```
+
+```{r, fig.width=7, fig.height=8}
+# Arrange plots in 4 rows and 1 column
+par(mfrow=c(4,1)) 
+
+plot(station_96_df$datetime, station_96_df$pm25, type="o", pch=19, cex=.3, cex.main = 0.8, xlab = "Time (t)", ylab = "PM2.5 levels", main="PM2.5 levels at Station 96")
+
+plot(station_99_df$datetime, station_99_df$pm25, type="o", pch=19, cex=.3, cex.main = 0.8, xlab = "Time (t)", ylab = "PM2.5 levels", main="PM2.5 levels at Station 99")
+
+plot(station_41_df$datetime, station_41_df$pm25, type="o", pch=19, cex=.3, cex.main = 0.8, xlab = "Time (t)", ylab = "PM2.5 levels", main="PM2.5 levels at Station 41")
+
+plot(station_47_df$datetime, station_47_df$pm25, type="o", pch=19, cex=.3, cex.main = 0.8, xlab = "Time (t)", ylab = "PM2.5 levels", main="PM2.5 levels at Station 47")
+```
+
+```{r}
+station_96 <- ts(station_96_df$pm25)
+station_99 <- ts(station_99_df$pm25)
+station_47 <- ts(station_47_df$pm25)
+station_41 <- ts(station_41_df$pm25)
+data_for_corr <- data.frame(station_96, station_99, station_47, station_41)
+data_for_corr$station_96 <- as.numeric(data_for_corr$station_96)
+data_for_corr$station_99 <- as.numeric(data_for_corr$station_99)
+data_for_corr$station_47 <- as.numeric(data_for_corr$station_47)
+data_for_corr$station_41 <- as.numeric(data_for_corr$station_41)
+
+# Calculate correlation matrix
+correlation_matrix <- cor(data_for_corr)
+print(correlation_matrix)
+```
+
+The time plots and the correlation matrix reveal significant positive correlation between stations 96 and 99 (around 0.89) and moderate positive correlation between stations 47 and 41 (approximately 0.87). Conversely, the correlations between station 96 or station 99 with station 47 and station 41 are notably weaker (around 0.25). 
+
+```{r}
+
+# Define the station names
+station_names <- c("station_96", "station_99", "station_47", "station_41")
+
+# Create an empty dataframe to store station coordinates
+station_coordinates <- data.frame(station = station_names, latitude = numeric(4), longitude = numeric(4))
+
+# Assign latitude and longitude values for each station
+station_coordinates$latitude <- c(station_96_df$Latitude[1], station_99_df$Latitude[1], station_47_df$Latitude[1], station_41_df$Latitude[1])
+station_coordinates$longitude <- c(station_96_df$Longitude[1], station_99_df$Longitude[1], station_47_df$Longitude[1], station_41_df$Longitude[1])
+```
+
+
+```{r}
+# Function to compute Euclidean distance between latitude-longitude pairs
+euclidean_distance <- function(lat1, lon1, lat2, lon2) {
+  lat1 <- as.numeric(lat1)
+  lon1 <- as.numeric(lon1)
+  lat2 <- as.numeric(lat2)
+  lon2 <- as.numeric(lon2)
+  dist <- sqrt((lat2 - lat1)^2 + (lon2 - lon1)^2)
+  return(dist)
+}
+
+```
+
+```{r}
+
+# Create an empty matrix to store distances
+distance_matrix <- matrix(NA, nrow = nrow(station_coordinates), ncol = nrow(station_coordinates))
+
+# Compute distances between each pair of stations
+for (i in 1:nrow(station_coordinates)) {
+  for (j in 1:nrow(station_coordinates)) {
+    distance_matrix[i, j] <- euclidean_distance(station_coordinates[i, "latitude"], station_coordinates[i, "longitude"], station_coordinates[j, "latitude"],station_coordinates[j, "longitude"])
+  }
+}
+
+# Assign row and column names to the matrix
+rownames(distance_matrix) <- station_coordinates$station
+colnames(distance_matrix) <- station_coordinates$station
+
+# Print the distance matrix
+print(distance_matrix)
+```
+This spatial relationship is further confirmed by the Euclidean distances, computed from the latitudes and longitudes. Indeed, stations 96 and 99 are in close proximity, with a Euclidean distance of 0.13, while stations 47 and 41 are also closer, with a distance of 0.51. In contrast, the distance between stations 99 or 96 and stations 41 or 47 extends to approximately 5 units, indicating a notable spatial separation between these pairs.
+
+
+```{r, fig.width=6, fig.height=6}
+generate_log_averages_pm25_df <- function(station_df) {
+  # Compute log-transformed pm25 values
+  log_pm25 <- log(as.numeric(station_df$pm25))
+  
+  # Convert datetime column to POSIXct format
+  station_df$datetime <- as.POSIXct(station_df$datetime)
+  
+  # Create intervals for original data
+  station_df$interval <- cut(station_df$datetime, breaks = "48 hours")
+  
+  # Create data frame for log-transformed data
+  log_pm25_df <- data.frame(datetime = station_df$datetime, log_pm25 = log_pm25, interval = station_df$interval)
+  
+  # Aggregate by intervals and compute the mean for log-transformed data
+  log_averages_pm25_df <- aggregate(log_pm25 ~ interval, data = log_pm25_df, FUN = mean)
+  
+  return(log_averages_pm25_df)
+}
+
+log_averages_pm25_96_df <- generate_log_averages_pm25_df(station_96_df)
+log_averages_pm25_99_df <- generate_log_averages_pm25_df(station_99_df)
+log_averages_pm25_47_df <- generate_log_averages_pm25_df(station_47_df)
+log_averages_pm25_41_df <- generate_log_averages_pm25_df(station_41_df)
+
+```
+
+```{r, fig.width=7, fig.height=8}
+# Arrange plots in 4 rows and 1 column
+par(mfrow=c(4,1)) 
+
+
+plot(log_averages_pm25_96_df$interval, log_averages_pm25_96_df$log_pm25, type = "l", col = "purple", xlab = "Time Interval", ylab = "Average Log PM2.5", main = "Averages of Log-transformed PM2.5 Levels at station 96", cex.main = 0.9)
+lines(log_averages_pm25_96_df$interval, log_averages_pm25_96_df$log_pm25, col = "black")
+
+plot(log_averages_pm25_99_df$interval, log_averages_pm25_99_df$log_pm25, type = "l", col = "purple", xlab = "Time Interval", ylab = "Average Log PM2.5", main = "Averages of Log-transformed PM2.5 Levels at station 99", cex.main = 0.9)
+lines(log_averages_pm25_99_df$interval, log_averages_pm25_99_df$log_pm25, col = "black")
+
+plot(log_averages_pm25_47_df$interval, log_averages_pm25_47_df$log_pm25, type = "l", col = "purple", xlab = "Time Interval", ylab = "Average Log PM2.5", main = "Averages of Log-transformed PM2.5 Levels at station 47", cex.main = 0.9)
+lines(log_averages_pm25_47_df$interval, log_averages_pm25_47_df$log_pm25, col = "black")
+
+plot(log_averages_pm25_41_df$interval, log_averages_pm25_41_df$log_pm25, type = "l", col = "purple", xlab = "Time Interval", ylab = "Average Log PM2.5", main = "Averages of Log-transformed PM2.5 Levels at station 41", cex.main = 0.9)
+lines(log_averages_pm25_41_df$interval, log_averages_pm25_41_df$log_pm25, col = "black")
+```
+
+
+```{r}
+log_stations_data <- cbind(log_averages_pm25_96_df$log_pm25, log_averages_pm25_99_df$log_pm25, log_averages_pm25_47_df$log_pm25, log_averages_pm25_41_df$log_pm25)
+```
+
+Thus, the approach now consists in a multivariate model for the $m$-dimensional vector $\mathbf{Y}_t = (Y_{j1,t}, \ldots, Y_{jm,t})'$ of PM$_{2.5}$ levels observed at stations $j_1, \ldots, j_m$ at time $t$, where $m=4$. Again, a random walk plus noise model is considered:
+
+
+
+\[
+\begin{cases}
+    Y_t = \theta_t + v_t, & \text{where } v_t \sim \text{N}_m(\mathbf{0}, V) \\
+    \theta_t = \theta_{t-1} + w_t, & \text{where } w_t \sim \text{N}_p(\mathbf{0}, W)
+\end{cases}
+\]
+
+
+with $\theta_0 \sim N(m_0, C_0)$, $\theta_0  \perp (w_t) \perp (v_t)$ between them. \\ The measurement errors $v_{j,t}$ are independent across different locations, so the matrix V is diagonal:
+\[
+V =
+\begin{bmatrix}
+\sigma^2_{v,1} & 0 & 0 & 0 \\
+0 & \sigma^2_{v,2} & 0 & 0 \\
+0 & 0 & \sigma^2_{v,3} & 0 \\
+0 & 0 & 0 & \sigma^2_{v,4}
+\end{bmatrix}
+\]
+
+Conversely, the evolution errors $w_t = (w_{j1,t}, \ldots, w_{jm,t})$ are spatially correlated: the covariance matrix W is not diagonal, but it is modelled through the exponential covariance function:
+
+\[
+W[i,k] = \text{Cov}(w_{j,t}, w_{k,t}) = \sigma^2 \exp(-\phi D[j,k]), \quad j,k = 1, \ldots, m,
+\]
+where $\sigma^2 > 0$ and constant across locations; $\phi > 0$ is a decay parameter; and $D[j,k]$ is the distance between stations $j$ and $k$, so that the $\text{Cov}(w_{j,t}, w_{k,t})$ between two different stations j and k decreases as the distance between them increases.
+
+```{r}
+
+# Define a function to build the multivariate dynamic linear model
+buildDLM <- function(param, distance_matrix) {
+  # Extract parameters
+  sigma_squared_v <- param[1:4]  # Variances of the observation noise (varying along the diagonal)
+  sigma_squared_w <- param[5]  # Variance of the state noise
+  phi <- param[6]              # Decay parameter for spatial dependence
+  
+  # Number of stations
+  m <- length(sigma_squared_v)
+  
+  # Define matrices V and W
+  V <- diag(sigma_squared_v)  # matrix V with varying sigma_squared_v along the diagonal
+  W <- sigma_squared_w * exp(-phi * distance_matrix)  
+  
+  # Initialize the initial state mean
+  m0 <- log_stations_data[1,]
+  C0 <- diag(m) * 1 #high variance, we are not sure about our prior
+  
+  mod <- dlmModPoly(order = 1)
+  mod$FF <- diag(m) 
+  mod$GG <- diag(m) 
+  
+  mod$W <- W 
+  mod$V <- V
+  
+  mod$m0 <- m0
+  mod$C0 <- C0
+  
+  return(mod)
+}
+
+```
+
+```{r}
+# Use the L-BFGS-B algorithm to estimate parameters for different initial values
+
+MLE1_multiv <- dlmMLE(log_stations_data, parm = c(rep(0.001, 4), 0.001, 0.1), buildDLM, method = "L-BFGS-B", lower = c(rep(0.0001, 4), 0, 0.0001), hessian = TRUE, distance_matrix = distance_matrix)
+
+MLE2_multiv <- dlmMLE(log_stations_data, parm = c(rep(0.01, 4), 0.01, 0.1), buildDLM, method = "L-BFGS-B", lower = c(rep(0.0001, 4), 0, 0.0001), hessian = TRUE, distance_matrix = distance_matrix)
+
+MLE3_multiv <- dlmMLE(log_stations_data, parm = c(rep(0.1, 4), 0.1, 0.1), buildDLM, method = "L-BFGS-B", lower = c(rep(0.0001, 4), 0, 0.0001), hessian = TRUE, distance_matrix = distance_matrix)
+
+MLE4_multiv <- dlmMLE(log_stations_data, parm = c(rep(1, 4), 1, 0.1), buildDLM, method = "L-BFGS-B", lower = c(rep(0.0001, 4), 0, 0.0001), hessian = TRUE, distance_matrix = distance_matrix)
+
+
+# Print the MLE values for different parameter initializations
+print("MLE and loglikelihood for different initial values using standard algorithm:")
+print("(0.001, 0.001)")
+print(c(MLE1_multiv$par, MLE1_multiv$value))
+print("(0.01, 0.01)")
+print(c(MLE2_multiv$par, MLE2_multiv$value))
+print("(0.1, 0.1)")
+print(c(MLE3_multiv$par, MLE3_multiv$value))
+print("(1, 1)")
+print(c(MLE4_multiv$par, MLE4_multiv$value))
+
+
+# Identify the best MLE value
+print("Index with minimum value of the loglikelihood")
+min_value <- which.min(c(MLE1_multiv$value, MLE2_multiv$value, MLE3_multiv$value, MLE4_multiv$value))
+print(min_value)
+```
+As before, maximum likelihood estimation is performed to estimate the unknown parameters of the model of interest, namely $\sigma^2_{v,1}$, $\sigma^2_{v,2}$, $\sigma^2_{v,3}$, $\sigma^2_{v,4}$ (the observations variances at station 96, 99, 47, 41), $\sigma^2_{w}$ (state variance) and $\phi$. Additionally, lower bounds for the variances were set at 0.0001 for all the $\sigma^2_{v,i}$, $i=\{1,2,3,4\}$ and for $\phi$ and at 0 for \(\sigma^2_w\). Multiple sets of initial parameter values for the variances were tested, including 0.001, 0.01, 0.1, and 1, while keeping the initial value for $\phi$ constant at 0.1. The likelihood optimization consistently converged to parameter values of 0.01, with the resulting estimates and likelihood values being nearly identical across all tested cases.
+
+The standard errors of the MLEs are again computed by extracting the square root of the diagonal elements of the asymptotic covariance matrix.
+
+```{r}
+# Compute the asymptotic covariance matrix of the maximum likelihood estimators (MLEs) using the inverse of the Hessian matrix
+AsymCov = solve(MLE1_multiv$hessian)
+
+# Compute the standard errors of the maximum likelihood estimators (MLEs) by taking the square root of the diagonal elements of the asymptotic covariance matrix
+sqrt(diag(AsymCov))
+```
+
+
+```{r}
+MLE1_multiv$par[1] 
+MLE1_multiv$par[2]
+MLE1_multiv$par[3]
+MLE1_multiv$par[4]
+MLE1_multiv$par[5]
+MLE1_multiv$par[6]
+```
+The observation noise variances have been notably reduced compared to the previous model, suggesting that the observed data points are now considered more precise and close to the underlying state. Conversely, the estimated $\sigma^2_w$ increased from 0.0064 to 0.07497, indicating a higher level of uncertainty in the evolution of the underlying state process.
+The standard errors of the estimates of the observation variances have experienced a notable reduction, ranging from 5 to 20 times lower. In contrast, there is a marginal increase in the standard error associated with the state variance, which has augmented from 0.007 to 0.01. Thus, the signal-to-noise ratio exceeds 1 for all stations.
+
+```{r}
+
+mle_estimates <- MLE1_multiv$par
+
+# Compute the asymptotic covariance matrix of the MLEs using the inverse of the Hessian matrix
+asym_cov <- solve(MLE1_multiv$hessian)
+
+# Compute the standard errors of the MLEs by taking the square root of the diagonal elements of the asymptotic covariance matrix
+std_errors <- sqrt(diag(asym_cov))
+
+print("Parameters' standard errors")
+print(std_errors)
+```
+
+```{r}
+# Calculate the 95% confidence intervals
+alpha <- 0.05
+z_value <- qnorm(1 - alpha / 2)
+
+lower_bound <- pmax(0, mle_estimates - z_value * std_errors)
+upper_bound <- mle_estimates + z_value * std_errors
+
+# Combine the results into a matrix for easy viewing
+confidence_intervals <- cbind(lower_bound, upper_bound)
+colnames(confidence_intervals) <- c("Lower 95% CI", "Upper 95% CI")
+rownames(confidence_intervals) <- c("sigma_squared_v1", "sigma_squared_v2", "sigma_squared_v3", "sigma_squared_v4", "sigma_squared_w", "phi")
+
+print("Parameters' Credible intervals")
+print(confidence_intervals)
+```
+
+
+```{r, out.width='60%'}
+# Create a dynamic linear model (DLM) with polynomial trend component
+mle_estimates <- MLE1_multiv$par
+m <- 4
+sigma_squared_v <- mle_estimates[1:m]
+V <- diag(sigma_squared_v)
+sigma_squared_w <- mle_estimates[m+1]
+phi <- mle_estimates[m+2]
+W <- sigma_squared_w * exp(-phi * distance_matrix)
+mod <- dlmModPoly(order = 1)
+mod$FF <- diag(m)
+mod$GG <- diag(m)
+mod$W <- W 
+mod$V <- V
+mod$m0 <- log_stations_data[1,]
+  
+# Apply the DLM filter to the log-transformed PM2.5 data to estimate unobserved states
+outFilt <- dlmFilter(log_stations_data, mod)
+
+```
+
+The one-step-ahead forecasts are:
+
+```{r}
+# Extract the filtered state estimates from the DLM output, removing the first element
+estimates1 <- dropFirst(outFilt$f)
+
+# Compute the variance-covariance matrix of the filtered states using singular value decomposition (SVD)
+listC1 <- dlmSvd2var(outFilt$U.R, outFilt$D.R)
+
+# Compute the square root of the diagonal elements of the variance-covariance matrix for each time point
+sqrtC1 <- lapply(listC1, function(x) sqrt(diag(x)))
+
+# Convert listC1 (a list of matrices) to a matrix where each row corresponds to a time point and each column corresponds to a state
+sqrtC1_matrix <- do.call(rbind, sqrtC1)
+
+# Compute the lower bounds of the 95% confidence intervals for the state estimates
+ci_lower1 <- estimates1 - 1.96 * sqrtC1_matrix[-1, ]
+# Compute the upper bounds of the 95% confidence intervals for the state estimates
+ci_upper1 <- estimates1 + 1.96 * sqrtC1_matrix[-1, ]
+
+# Define the time intervals
+time_intervals <- 1:nrow(log_stations_data)  # Assuming the rows of 'data' correspond to time points
+```
+
+```{r, out.width='60%'}
+i = 1
+plot(log_averages_pm25_96_df$interval, log_stations_data[, i], type = "o", col = "black", lwd = 1,
+       main = paste("One-Step-Ahead Forecasts and Credible Intervals for Station 96"), cex=0.1, cex.main = 0.7,
+       xlab = "Time", ylab = "Log-averaged PM2.5 Levels",
+       ylim = c(min(ci_lower1[, i], na.rm = TRUE), max(ci_upper1[, i], na.rm = TRUE)))
+  
+lines(log_averages_pm25_96_df$interval, log_stations_data[, i], col = "black", lwd = 2)
+  # Add the estimates to the plot
+  lines(time_intervals[-1], estimates1[, i], col = "red", lwd = 2)
+  # Add the lower and upper credible intervals
+  lines(time_intervals[-1], ci_lower1[, i], col = "blue", lty = 2)
+  lines(time_intervals[-1], ci_upper1[, i], col = "blue", lty = 2)
+  
+  # Adding a legend to clarify the plot elements
+  legend("bottomright", legend = c("Observations", "Estimates", "95% CI Lower", "95% CI Upper"),
+         col = c("black", "red", "blue", "blue"), lty = c(1, 1, 2, 2), lwd = c(2, 2, 2, 2), cex = 0.55)
+```
+
+Afterwards, the MLEs are plugged into the model to generate one-step-ahead forecasts. Figure 4 presents these forecasts for series 96, allowing for a comparison with the previous model. 
+Compared to the previous model, the forecasts still closely track the observed observations, but this time they are significantly more precise, particularly in accurately capturing the sudden shocks observed at the end of summer 2020. This increased precision highlights the multivariate model's ability to leverage information and borrow strength from multiple time series by incorporating spatial dependence among the time series through the covariance structure of the evolution errors. 
+Given that the signal-to-noise ratio exceeds 1, forecasts now adapt more quickly to changes, as each new observation provides reliable information about the state of the system due to the lower $\sigma^2_v$s values. 
+
+```{r, out.width='60%'}
+i = 2
+plot(log_averages_pm25_99_df$interval, log_stations_data[, i], type = "o", col = "black", lwd = 1,
+       main = paste("One-Step-Ahead Forecasts and Credible Intervals for Station 99"), cex=0.1, cex.main = 0.7,
+       xlab = "Time", ylab = "Log-averaged PM2.5 Levels",
+       ylim = c(min(ci_lower1[, i], na.rm = TRUE), max(ci_upper1[, i], na.rm = TRUE)))
+  
+lines(log_averages_pm25_99_df$interval, log_stations_data[, i], col = "black", lwd = 2)
+  # Add the estimates to the plot
+  lines(time_intervals[-1], estimates1[, i], col = "red", lwd = 2)
+  # Add the lower and upper credible intervals
+  lines(time_intervals[-1], ci_lower1[, i], col = "blue", lty = 2)
+  lines(time_intervals[-1], ci_upper1[, i], col = "blue", lty = 2)
+  
+  # Adding a legend to clarify the plot elements
+  legend("bottomright", legend = c("Observations", "Estimates", "95% CI Lower", "95% CI Upper"),
+         col = c("black", "red", "blue", "blue"), lty = c(1, 1, 2, 2), lwd = c(2, 2, 2, 2), cex = 0.55)
+```
+```{r, out.width='60%'}
+i = 3
+plot(log_averages_pm25_47_df$interval, log_stations_data[, i], type = "o", col = "black", lwd = 1,
+       main = paste("One-Step-Ahead Forecasts and Credible Intervals for Station 47"), cex=0.1, cex.main = 0.7,
+       xlab = "Time", ylab = "Log-averaged PM2.5 Levels",
+       ylim = c(min(ci_lower1[, i], na.rm = TRUE), max(ci_upper1[, i], na.rm = TRUE)))
+  
+lines(log_averages_pm25_47_df$interval, log_stations_data[, i], col = "black", lwd = 2)
+  # Add the estimates to the plot
+  lines(time_intervals[-1], estimates1[, i], col = "red", lwd = 2)
+  # Add the lower and upper credible intervals
+  lines(time_intervals[-1], ci_lower1[, i], col = "blue", lty = 2)
+  lines(time_intervals[-1], ci_upper1[, i], col = "blue", lty = 2)
+  
+  # Adding a legend to clarify the plot elements
+  legend("bottomright", legend = c("Observations", "Estimates", "95% CI Lower", "95% CI Upper"),
+         col = c("black", "red", "blue", "blue"), lty = c(1, 1, 2, 2), lwd = c(2, 2, 2, 2), cex = 0.55)
+```
+
+
+```{r, out.width='60%'}
+i = 4
+plot(log_averages_pm25_41_df$interval, log_stations_data[, i], type = "o", col = "black", lwd = 1,
+       main = paste("One-Step-Ahead Forecasts and Credible Intervals for Station 41"), cex=0.1, cex.main = 0.7,
+       xlab = "Time", ylab = "Log-averaged PM2.5 Levels",
+       ylim = c(min(ci_lower1[, i], na.rm = TRUE), max(ci_upper1[, i], na.rm = TRUE)))
+  
+lines(log_averages_pm25_41_df$interval, log_stations_data[, i], col = "black", lwd = 2)
+  # Add the estimates to the plot
+  lines(time_intervals[-1], estimates1[, i], col = "red", lwd = 2)
+  # Add the lower and upper credible intervals
+  lines(time_intervals[-1], ci_lower1[, i], col = "blue", lty = 2)
+  lines(time_intervals[-1], ci_upper1[, i], col = "blue", lty = 2)
+  
+  # Adding a legend to clarify the plot elements
+  legend("bottomright", legend = c("Observations", "Estimates", "95% CI Lower", "95% CI Upper"),
+         col = c("black", "red", "blue", "blue"), lty = c(1, 1, 2, 2), lwd = c(2, 2, 2, 2), cex = 0.55)
+```
+
+
+
+
+```{r, fig.width=4, fig.height=6}
+tsdiag(outFilt)
+```
+
+The plot of the autocorrelation function (ACF) reveals no significant correlation, indicating that the assumption of independence among residuals is upheld. Thus, we are satisfied with the validity of our model.
+
+```{r, out.width='80%'}
+# Extract the standardized errors for each time series
+standardized_errors <- residuals(outFilt)$res
+
+qqPlot(standardized_errors[, 1], main = "QQ Plot for Station 96", ylab = "Standardized errors")
+qqPlot(standardized_errors[, 2], main = "QQ Plot for Station 99", ylab = "Standardized errors")
+qqPlot(standardized_errors[, 3], main = "QQ Plot for Station 47", ylab = "Standardized errors")
+qqPlot(standardized_errors[, 4], main = "QQ Plot for Station 41", ylab = "Standardized errors")
+
+```
+
+However, the QQ plot of the standardized residuals still shows deviations from the reference line at the tails of the distribution. Again, this might signal that the Normality assumption could be overly restrictive or that the current model specification is not correct.
