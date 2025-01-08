@@ -5,7 +5,7 @@ This repository analyzes PM2.5 air pollution data collected during the summer of
 ## Files
 
 - **`time_series.Rmd`**: An R Markdown file that includes the complete time series analysis workflow, from data preprocessing to modeling and visualization.
-- **`time_series.Rmd`**: A comprehensive report summarizing the methodology, models, and results of the time series analysis.
+- **`Time_Series_Project.Rmd`**: A comprehensive report summarizing the methodology, models, and results of the time series analysis.
 
 ## Authors
 
